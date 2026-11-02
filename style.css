@@ -1,0 +1,10 @@
+body{margin:0;background:#F1EEE8;color:#26221F;font:17px/1.6 Georgia,"Times New Roman",serif}
+main{max-width:680px;margin:0 auto;padding:56px 24px 80px}
+h1{font-weight:400;font-size:44px;line-height:1.1;margin:16px 0 4px}
+h1 em,h2 em{color:#1C589C}
+h2{font-weight:400;font-size:24px;margin:36px 0 8px}
+p,li{font-family:-apple-system,"Segoe UI",Inter,Arial,sans-serif;font-size:16px}
+.tag{color:#1C589C;font-style:italic;font-size:20px;margin:0 0 28px}
+a{color:#1C589C}
+img.logo{width:96px;height:96px;border-radius:50%}
+footer{margin-top:56px;border-top:1px solid #B2A696;padding-top:16px;font-family:Arial,sans-serif;font-size:14px;color:#6b6259}

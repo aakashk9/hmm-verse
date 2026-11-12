@@ -1,0 +1,155 @@
+name: Publish reels (B)
+
+# Second reel feed, published from this public repo because Actions minutes are free here. Same pattern as
+# publish-hmmverse.yml: the reels and tools are read from the private source repo with REEL_ENGINE_TOKEN, and the
+# result is recorded back there so nothing is posted twice. This public log stays quiet on purpose: it shows only
+# counts and ok/failed; the full publish log is saved next to the reel in the private repo (publish_log.txt).
+#
+# Every 15 minutes it looks for finished folders posts/renders/YYYY-MM-DD_slug/ with reel.mp4 + caption.md, no
+# published.json and no skip file, dated within the last 4 days, and posts the OLDEST one (Instagram reel + Story +
+# first comment). Spacing: one reel per run, and only when the previous post of this feed is at least B_MIN_GAP_MIN
+# minutes old (repo variable, default 120). A manual run with a folder ignores the gap.
+# Secrets: B_ACCESS_TOKEN, B_USER_ID, REEL_ENGINE_TOKEN. Master switch: repo variable B_AUTOPUBLISH = "on".
+on:
+  schedule:
+    - cron: "2,17,32,47 * * * *"
+  workflow_dispatch:
+    inputs:
+      folder:
+        description: "Optional: one folder (or --comment= / --recomment= / --story=<folder>); empty = oldest pending"
+        required: false
+        default: ""
+      dry_run:
+        description: "Only check files, caption and tokens; do not post"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-b
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      SRC: aakashk9/reel-engine
+    steps:
+      - name: Check switch and tokens
+        id: gate
+        env:
+          AUTOPUBLISH: ${{ vars.B_AUTOPUBLISH }}
+          HAS_TOKEN: ${{ secrets.REEL_ENGINE_TOKEN != '' && secrets.B_ACCESS_TOKEN != '' && secrets.B_USER_ID != '' }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [ "$HAS_TOKEN" != "true" ]; then echo "A secret is missing - nothing to do."; echo "go=" >> "$GITHUB_OUTPUT"; exit 0; fi
+          if [ "$EVENT" != "workflow_dispatch" ] && [ "$AUTOPUBLISH" != "on" ]; then echo "B_AUTOPUBLISH is not 'on'."; echo "go=" >> "$GITHUB_OUTPUT"; exit 0; fi
+          echo "go=1" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        if: steps.gate.outputs.go
+        with:
+          repository: ${{ env.SRC }}
+          token: ${{ secrets.REEL_ENGINE_TOKEN }}
+          fetch-depth: 1
+          filter: blob:none
+          sparse-checkout: |
+            tools
+
+      - name: Find the reel to publish
+        id: pick
+        if: steps.gate.outputs.go
+        env:
+          INPUT_FOLDER: ${{ inputs.folder }}
+          MIN_GAP: ${{ vars.B_MIN_GAP_MIN || '120' }}
+        run: |
+          if [ -n "$INPUT_FOLDER" ]; then
+            folders="${INPUT_FOLDER%/}"
+          else
+            since=$(TZ=Asia/Kolkata date -d '4 days ago' +%Y-%m-%d)
+            files=$(git ls-tree -r --name-only HEAD posts/renders/)
+            last=0
+            for pj in $(echo "$files" | grep -E '^posts/renders/[^/]+/published\.json$' | sort | tail -n 8); do
+              ts=$(git show "HEAD:$pj" | python3 -c "import json,sys,datetime;d=json.load(sys.stdin).get('published_at','');print(int(datetime.datetime.fromisoformat(d).timestamp()) if d else 0)" 2>/dev/null || echo 0)
+              [ "${ts:-0}" -gt "$last" ] && last=$ts
+            done
+            gap=$(( ($(date +%s) - last) / 60 ))
+            echo "Last post of this feed: ${gap} min ago (minimum gap ${MIN_GAP} min)"
+            folders=""
+            if [ "$gap" -ge "$MIN_GAP" ]; then
+              for d in $(echo "$files" | grep -E '^posts/renders/20[0-9]{2}-[0-9]{2}-[0-9]{2}_[^/]+/reel\.mp4$' | xargs -r -n1 dirname | sort -u); do
+                day=$(basename "$d" | cut -c1-10)
+                [[ "$day" < "$since" ]] && continue
+                echo "$files" | grep -qx "$d/caption.md" || continue
+                echo "$files" | grep -qx "$d/published.json" && continue
+                echo "$files" | grep -qx "$d/skip" && continue
+                folders="$d"; break        # oldest pending folder only
+              done
+            fi
+          fi
+          folders=$(echo $folders)
+          n=$(echo $folders | wc -w)
+          echo "Reels selected: $n"
+          echo "folders=$folders" >> "$GITHUB_OUTPUT"
+          if [ -n "$folders" ]; then
+            for f in $folders; do case "$f" in --*=*) f="${f#*=}";; esac; git sparse-checkout add "$f" >/dev/null 2>&1; done
+          fi
+
+      - name: Install ffmpeg (only if a Story copy must be trimmed)
+        if: steps.pick.outputs.folders != ''
+        run: |
+          need=$(python3 - ${{ steps.pick.outputs.folders }} <<'PY'
+          import os, struct, sys
+          def dur(p):
+              b = open(p, "rb").read(); i = b.find(b"mvhd")
+              if i < 0: return 999
+              v = b[i + 4]
+              ts, d = (struct.unpack(">IQ", b[i + 24:i + 36]) if v == 1 else struct.unpack(">II", b[i + 16:i + 24]))
+              return d / ts
+          fs = [a.split("=", 1)[-1] for a in sys.argv[1:]]
+          print(any(dur(os.path.join(f, "reel.mp4")) > 59.5 for f in fs if os.path.exists(os.path.join(f, "reel.mp4"))))
+          PY
+          )
+          echo "Story copy needs trimming: $need"
+          if [ "$need" = "True" ]; then which ffmpeg || (sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends ffmpeg); fi
+
+      # Quiet log: the full output goes to publish_log.txt in the reel's folder (committed to the private repo only).
+      - name: Publish to Instagram
+        id: pub
+        if: steps.pick.outputs.folders != ''
+        env:
+          IG_ACCESS_TOKEN: ${{ secrets.B_ACCESS_TOKEN }}
+          IG_USER_ID: ${{ secrets.B_USER_ID }}
+          IG_API_VERSION: ${{ vars.IG_API_VERSION || 'v23.0' }}
+          IG_STORY: ${{ vars.B_STORY || 'on' }}
+          DRY_RUN: ${{ inputs.dry_run && '1' || '' }}
+          PYTHONUNBUFFERED: "1"
+          IG_DEADLINE_MIN: "45"
+        shell: bash
+        run: |
+          # the first-comment text lives in the private repo (tools/feed_b.env), not in this public file
+          [ -f tools/feed_b.env ] && set -a && . tools/feed_b.env && set +a
+          f=$(echo ${{ steps.pick.outputs.folders }} | awk '{print $1}'); f="${f#*=}"
+          log="$f/publish_log.txt"; mkdir -p "$f"
+          echo "=== $(date -u +%FT%TZ) run ${{ github.run_id }}" >> "$log"
+          python3 tools/ig_publish.py ${{ steps.pick.outputs.folders }} >> "$log" 2>&1; rc=$?
+          if [ $rc -eq 0 ]; then echo "result: ok"; else echo "result: failed (exit $rc) - details in publish_log.txt in the private repo"; fi
+          exit $rc
+
+      - name: Record the result in the private repo
+        if: always() && steps.pick.outputs.folders != ''
+        run: |
+          git config user.name "publisher"
+          git config user.email "noreply@github.com"
+          for f in ${{ steps.pick.outputs.folders }}; do
+            f="${f#*=}"
+            for j in published.json publish_log.txt; do [ -f "$f/$j" ] && git add -f "$f/$j"; done
+          done
+          if ! git diff --cached --quiet; then
+            git commit -q -m "Record publish [skip ci]"
+            for i in 1 2 3; do git pull -q --rebase origin main && git push -q origin HEAD:main && break; sleep 5; done
+          fi
+          echo "recorded"

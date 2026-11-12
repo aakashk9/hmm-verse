@@ -8,7 +8,8 @@ name: Publish reels (B)
 # Every 15 minutes it looks for finished folders posts/renders/YYYY-MM-DD_slug/ with reel.mp4 + caption.md, no
 # published.json and no skip file, dated within the last 4 days, and posts the OLDEST one (Instagram reel + Story +
 # first comment). Spacing: one reel per run, and only when the previous post of this feed is at least B_MIN_GAP_MIN
-# minutes old (repo variable, default 120). A manual run with a folder ignores the gap.
+# minutes old (repo variable, default 120). A manual run with a folder ignores the gap. A folder whose
+# publish_log.txt shows 2 failed runs is skipped by the timer (run it by hand), so one stuck reel can't block the queue.
 # Secrets: B_ACCESS_TOKEN, B_USER_ID, REEL_ENGINE_TOKEN. Master switch: repo variable B_AUTOPUBLISH = "on".
 on:
   schedule:
@@ -86,6 +87,11 @@ jobs:
                 echo "$files" | grep -qx "$d/caption.md" || continue
                 echo "$files" | grep -qx "$d/published.json" && continue
                 echo "$files" | grep -qx "$d/skip" && continue
+                # a reel Instagram already refused twice is left for a manual run, so it can't block the queue
+                if echo "$files" | grep -qx "$d/publish_log.txt"; then
+                  fails=$(git show "HEAD:$d/publish_log.txt" 2>/dev/null | grep -c "NOT PUBLISHED" || true)
+                  if [ "${fails:-0}" -ge 2 ]; then echo "1 reel skipped after 2 failed runs"; continue; fi
+                fi
                 folders="$d"; break        # oldest pending folder only
               done
             fi
@@ -127,7 +133,7 @@ jobs:
           IG_STORY: ${{ vars.B_STORY || 'on' }}
           DRY_RUN: ${{ inputs.dry_run && '1' || '' }}
           PYTHONUNBUFFERED: "1"
-          IG_DEADLINE_MIN: "45"
+          IG_DEADLINE_MIN: "25"     # fail fast: good uploads finish in ~1 min
         shell: bash
         run: |
           # the first-comment text lives in the private repo (tools/feed_b.env), not in this public file

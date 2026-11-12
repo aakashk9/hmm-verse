@@ -7,8 +7,10 @@ name: Publish Hmm.verse reels
 #
 # Every 15 minutes (and right after the reel run dispatches it) it looks for finished folders
 # science/renders/hmmverse/YYYY-MM-DD_N_slug/ in reel-engine that have reel.mp4 + caption.md, no published.json and
-# no skip file, dated within the last 2 days, and posts them to Instagram (+ Story + first comment), the Facebook Page
-# and YouTube Shorts. published.json / fb_published.json / yt_published.json are committed back to reel-engine, so a
+# no skip file, dated within the last 4 days, and posts the OLDEST one to Instagram (+ Story + first comment), the
+# Facebook Page and YouTube Shorts. Spacing (owner, 12 Nov 2026): one reel per run, and only when the last Hmm.verse
+# Instagram post is at least HMMVERSE_MIN_GAP_MIN minutes old (repo variable, default 120), so a backlog goes out
+# 2 hours apart instead of all at once. A manual run with a folder ignores the gap. published.json / fb_published.json / yt_published.json are committed back to reel-engine, so a
 # folder is never posted twice. Master switch: repo variable HMMVERSE_AUTOPUBLISH = "on".
 on:
   schedule:
@@ -65,21 +67,32 @@ jobs:
         if: steps.gate.outputs.go
         env:
           INPUT_FOLDER: ${{ inputs.folder }}
+          MIN_GAP: ${{ vars.HMMVERSE_MIN_GAP_MIN || '120' }}
         run: |
           if [ -n "$INPUT_FOLDER" ]; then
             folders="${INPUT_FOLDER%/}"
           else
-            since=$(TZ=Asia/Kolkata date -d '2 days ago' +%Y-%m-%d)
+            since=$(TZ=Asia/Kolkata date -d '4 days ago' +%Y-%m-%d)
             files=$(git ls-tree -r --name-only HEAD science/renders/hmmverse/)
-            folders=""
-            for d in $(echo "$files" | grep -E '^science/renders/hmmverse/20[0-9]{2}-[0-9]{2}-[0-9]{2}_[0-9]+_[^/]+/reel\.mp4$' | xargs -r -n1 dirname | sort -u); do
-              day=$(basename "$d" | cut -c1-10)
-              [[ "$day" < "$since" ]] && continue
-              echo "$files" | grep -qx "$d/caption.md" || continue
-              echo "$files" | grep -qx "$d/published.json" && continue
-              echo "$files" | grep -qx "$d/skip" && continue
-              folders="$folders $d"
+            # gap: newest published_at among the latest published folders (blobs are fetched on demand)
+            last=0
+            for pj in $(echo "$files" | grep -E '/published\.json$' | sort | tail -n 8); do
+              ts=$(git show "HEAD:$pj" | python3 -c "import json,sys,datetime;d=json.load(sys.stdin).get('published_at','');print(int(datetime.datetime.fromisoformat(d).timestamp()) if d else 0)" 2>/dev/null || echo 0)
+              [ "${ts:-0}" -gt "$last" ] && last=$ts
             done
+            gap=$(( ($(date +%s) - last) / 60 ))
+            echo "Last Hmm.verse Instagram post: ${gap} min ago (minimum gap ${MIN_GAP} min)" | tee -a "$GITHUB_STEP_SUMMARY"
+            folders=""
+            if [ "$gap" -ge "$MIN_GAP" ]; then
+              for d in $(echo "$files" | grep -E '^science/renders/hmmverse/20[0-9]{2}-[0-9]{2}-[0-9]{2}_[0-9]+_[^/]+/reel\.mp4$' | xargs -r -n1 dirname | sort -u); do
+                day=$(basename "$d" | cut -c1-10)
+                [[ "$day" < "$since" ]] && continue
+                echo "$files" | grep -qx "$d/caption.md" || continue
+                echo "$files" | grep -qx "$d/published.json" && continue
+                echo "$files" | grep -qx "$d/skip" && continue
+                folders="$d"; break        # oldest pending folder only
+              done
+            fi
           fi
           folders=$(echo $folders)
           echo "Reels selected: ${folders:-none}" | tee -a "$GITHUB_STEP_SUMMARY"

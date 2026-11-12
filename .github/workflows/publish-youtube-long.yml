@@ -1,0 +1,151 @@
+name: Publish Hmm.verse long videos to YouTube
+
+# Hmm.verse long-form YouTube episodes (16:9, YouTube ONLY, never Instagram/Facebook). Moved here from the private
+# reel-engine repo on 12 Nov 2026 (owner) because Actions minutes are free for public repositories.
+# The episodes are made in reel-engine: a folder science/renders/youtube/<YYYY-MM-DD_slug>/ with publish.json,
+# description.md and thumbnail.png. The video (~140 MB) is too big for git, so it comes from either
+#   1. the reel-engine release named by publish.json "release_tag" (asset video.mp4), or
+#   2. the temporary reel-engine branch yt-upload/<folder name> with parts yt-upload/video.mp4.part-aa, -ab, ...
+#      and yt-upload/video.mp4.sha256 (what the scheduled long-form session pushes; the branch is deleted after upload).
+# Rails: folder dated within the last 7 days, no skip file, no yt_published.json (committed back to reel-engine, so an
+# episode is never uploaded twice). Master switch for scheduled runs: repo variable YT_AUTOPUBLISH = "on".
+on:
+  schedule:
+    - cron: "41 * * * *"
+  workflow_dispatch:
+    inputs:
+      folder:
+        description: "Optional: one episode, e.g. science/renders/youtube/2026-11-09_how_big_is_space (or --check-account)"
+        required: false
+        default: ""
+      dry_run:
+        description: "Only check files, title and token; do not upload"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: youtube-long-hmmverse
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      SRC: aakashk9/reel-engine
+    steps:
+      - name: Check switch and token
+        id: gate
+        env:
+          AUTOPUBLISH: ${{ vars.YT_AUTOPUBLISH }}
+          HAS_TOKEN: ${{ secrets.REEL_ENGINE_TOKEN != '' }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [ "$HAS_TOKEN" != "true" ]; then echo "REEL_ENGINE_TOKEN secret missing - nothing to do."; echo "go=" >> "$GITHUB_OUTPUT"; exit 0; fi
+          if [ "$EVENT" != "workflow_dispatch" ] && [ "$AUTOPUBLISH" != "on" ]; then echo "YT_AUTOPUBLISH is not 'on'."; echo "go=" >> "$GITHUB_OUTPUT"; exit 0; fi
+          echo "go=1" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        if: steps.gate.outputs.go
+        with:
+          repository: ${{ env.SRC }}
+          token: ${{ secrets.REEL_ENGINE_TOKEN }}
+          fetch-depth: 1
+          filter: blob:none
+          sparse-checkout: |
+            tools
+
+      - name: Find episodes to publish
+        id: pick
+        if: steps.gate.outputs.go
+        env:
+          INPUT_FOLDER: ${{ inputs.folder }}
+        run: |
+          if [ -n "$INPUT_FOLDER" ]; then
+            folders="${INPUT_FOLDER%/}"
+          else
+            since=$(TZ=Asia/Kolkata date -d '7 days ago' +%Y-%m-%d)
+            files=$(git ls-tree -r --name-only HEAD science/renders/youtube/)
+            folders=""
+            for d in $(echo "$files" | grep -E '^science/renders/youtube/20[0-9]{2}-[0-9]{2}-[0-9]{2}_[^/]+/publish\.json$' | xargs -r -n1 dirname | sort -u); do
+              day=$(basename "$d" | cut -c1-10)
+              [[ "$day" < "$since" ]] && continue
+              echo "$files" | grep -qx "$d/yt_published.json" && continue
+              echo "$files" | grep -qx "$d/skip" && continue
+              folders="$folders $d"
+            done
+          fi
+          folders=$(echo $folders)
+          echo "Episodes selected: ${folders:-none}" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "folders=$folders" >> "$GITHUB_OUTPUT"
+          real=$(echo $folders | tr ' ' '\n' | grep -v '^--' | tr '\n' ' ')
+          if [ -n "$(echo $real)" ]; then git sparse-checkout add $real; fi
+
+      - name: Fetch the videos (release asset or yt-upload branch)
+        id: dl
+        if: steps.pick.outputs.folders != ''
+        env:
+          GH_TOKEN: ${{ secrets.REEL_ENGINE_TOKEN }}
+          FOLDERS: ${{ steps.pick.outputs.folders }}
+        run: |
+          ready=""; branches=""
+          for f in $FOLDERS; do
+            [ "$f" = "--check-account" ] && { ready="$ready $f"; continue; }
+            [ -f "$f/skip" ] && { echo "$f: skip file"; continue; }
+            [ -f "$f/yt_published.json" ] && { echo "$f: already on YouTube"; continue; }
+            slug=$(basename "$f")
+            tag=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('release_tag',''))" "$f/publish.json")
+            if [ -n "$tag" ] && gh release download "$tag" -R "$SRC" -p video.mp4 -D "$f" --clobber 2>/dev/null; then
+              echo "$f: video from release $tag"
+            elif git fetch -q --depth=1 origin "refs/heads/yt-upload/$slug:refs/remotes/origin/yt-upload/$slug" 2>/dev/null; then
+              rm -rf "/tmp/up_$slug" && mkdir -p "/tmp/up_$slug"
+              for p in $(git ls-tree --name-only "origin/yt-upload/$slug" yt-upload/ | grep -E 'video\.mp4\.(part-|sha256)'); do
+                git show "origin/yt-upload/$slug:$p" > "/tmp/up_$slug/$(basename $p)"
+              done
+              cat /tmp/up_$slug/video.mp4.part-* > "/tmp/up_$slug/video.mp4"
+              (cd "/tmp/up_$slug" && sha256sum -c video.mp4.sha256) || { echo "::error::$f: video hash mismatch"; continue; }
+              mv "/tmp/up_$slug/video.mp4" "$f/video.mp4"
+              echo "$f: video from branch yt-upload/$slug"; branches="$branches yt-upload/$slug"
+            else
+              echo "$f: no video yet (no release asset, no yt-upload branch) - will try again next hour" | tee -a "$GITHUB_STEP_SUMMARY"
+              continue
+            fi
+            ls -la "$f/video.mp4"; ready="$ready $f"
+          done
+          echo "folders=$(echo $ready)" >> "$GITHUB_OUTPUT"
+          echo "branches=$(echo $branches)" >> "$GITHUB_OUTPUT"
+
+      - name: Upload to YouTube
+        id: up
+        if: steps.dl.outputs.folders != ''
+        env:
+          YT_CLIENT_ID: ${{ secrets.YT_CLIENT_ID }}
+          YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
+          YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
+          YT_PRIVACY: ${{ vars.YT_PRIVACY || 'public' }}
+          YT_FIRST_COMMENT: ${{ vars.HMMVERSE_FIRST_COMMENT || 'Follow for daily hmm moments! 🤔' }}
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && '1' || '' }}
+        run: python3 tools/yt_publish.py ${{ steps.dl.outputs.folders }} 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"; exit ${PIPESTATUS[0]}
+        shell: bash
+
+      - name: Record published episodes in reel-engine
+        if: always() && steps.dl.outputs.folders != ''
+        env:
+          BRANCHES: ${{ steps.dl.outputs.branches }}
+          FOLDERS: ${{ steps.dl.outputs.folders }}
+        run: |
+          git config user.name "hmm.verse publisher"
+          git config user.email "noreply@github.com"
+          for f in $FOLDERS; do [ -f "$f/yt_published.json" ] && git add -f "$f/yt_published.json"; done
+          if ! git diff --cached --quiet; then
+            git commit -m "Record Hmm.verse YouTube long-form publish [skip ci]"
+            for i in 1 2 3; do git pull --rebase origin main && git push origin HEAD:main && break; sleep 5; done
+            # the temporary upload branch is no longer needed once the episode is on YouTube
+            for b in $BRANCHES; do
+              f="science/renders/youtube/${b#yt-upload/}"
+              [ -f "$f/yt_published.json" ] && git push origin --delete "$b" || true
+            done
+          fi

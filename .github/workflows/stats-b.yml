@@ -1,0 +1,57 @@
+name: Stats (B)
+
+# Read-only weekly stats for feed B. Never posts anything. The table is saved into the private source repo
+# (posts/stats/), not printed here.
+on:
+  schedule:
+    - cron: "53 3 * * 1"
+  workflow_dispatch:
+    inputs:
+      posts:
+        description: "How many latest posts"
+        default: "40"
+
+permissions:
+  contents: read
+
+jobs:
+  stats:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check tokens
+        id: gate
+        env:
+          HAS_TOKEN: ${{ secrets.REEL_ENGINE_TOKEN != '' && secrets.B_ACCESS_TOKEN != '' }}
+        run: echo "go=$([ "$HAS_TOKEN" = "true" ] && echo 1)" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
+        if: steps.gate.outputs.go
+        with:
+          repository: aakashk9/reel-engine
+          token: ${{ secrets.REEL_ENGINE_TOKEN }}
+          fetch-depth: 1
+          filter: blob:none
+          sparse-checkout: |
+            tools
+            posts/stats
+      - name: Read stats
+        if: steps.gate.outputs.go
+        env:
+          IG_ACCESS_TOKEN: ${{ secrets.B_ACCESS_TOKEN }}
+          IG_USER_ID: ${{ secrets.B_USER_ID }}
+          IG_API_VERSION: ${{ vars.IG_API_VERSION || 'v23.0' }}
+          N: ${{ inputs.posts || '40' }}
+          OUT_MD: posts/stats/latest.md
+          OUT_JSONL: posts/stats/history.jsonl
+          QUIET: "1"
+        run: mkdir -p posts/stats && python3 tools/ig_stats.py > /dev/null 2>&1 && echo "stats read" || echo "stats failed"
+      - name: Save into the source repo
+        if: steps.gate.outputs.go
+        run: |
+          git config user.name "stats"
+          git config user.email "noreply@github.com"
+          git add -f posts/stats
+          if ! git diff --cached --quiet; then
+            git commit -q -m "Weekly stats B [skip ci]"
+            for i in 1 2 3; do git pull -q --rebase origin main && git push -q origin HEAD:main && break; sleep 5; done
+          fi

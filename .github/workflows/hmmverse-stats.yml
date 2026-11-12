@@ -1,0 +1,59 @@
+name: Hmm.verse weekly stats (read-only)
+
+# Every Monday (and on demand) reads Hmm.verse's Instagram numbers per reel (views, reach, shares, saves, average watch
+# time, follows; needs instagram_manage_insights on HMMVERSE_ACCESS_TOKEN) and saves them PRIVATELY into reel-engine
+# (science/stats/hmmverse_latest.md + a dated line per reel in science/stats/hmmverse_history.jsonl), where the reel runs
+# use them to pick topics and hooks. Never posts anything. The numbers are not printed in this public log (QUIET=1).
+on:
+  schedule:
+    - cron: "33 3 * * 1"
+  workflow_dispatch:
+    inputs:
+      posts:
+        description: "How many latest posts"
+        default: "40"
+
+permissions:
+  contents: read
+
+jobs:
+  stats:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check token
+        id: gate
+        env:
+          HAS_TOKEN: ${{ secrets.REEL_ENGINE_TOKEN != '' }}
+        run: echo "go=$([ "$HAS_TOKEN" = "true" ] && echo 1)" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
+        if: steps.gate.outputs.go
+        with:
+          repository: aakashk9/reel-engine
+          token: ${{ secrets.REEL_ENGINE_TOKEN }}
+          fetch-depth: 1
+          filter: blob:none
+          sparse-checkout: |
+            tools
+            science/stats
+      - name: Read stats
+        if: steps.gate.outputs.go
+        env:
+          IG_ACCESS_TOKEN: ${{ secrets.HMMVERSE_ACCESS_TOKEN }}
+          IG_USER_ID: ${{ secrets.HMMVERSE_USER_ID }}
+          IG_API_VERSION: ${{ vars.IG_API_VERSION || 'v23.0' }}
+          N: ${{ inputs.posts || '40' }}
+          OUT_MD: science/stats/hmmverse_latest.md
+          OUT_JSONL: science/stats/hmmverse_history.jsonl
+          QUIET: "1"
+        run: python3 tools/ig_stats.py
+      - name: Save into reel-engine
+        if: steps.gate.outputs.go
+        run: |
+          git config user.name "hmm.verse stats"
+          git config user.email "noreply@github.com"
+          git add -f science/stats
+          if ! git diff --cached --quiet; then
+            git commit -m "Weekly Hmm.verse stats [skip ci]"
+            for i in 1 2 3; do git pull --rebase origin main && git push origin HEAD:main && break; sleep 5; done
+          fi

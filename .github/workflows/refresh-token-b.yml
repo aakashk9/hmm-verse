@@ -1,0 +1,46 @@
+name: Refresh token (B)
+
+# Instagram-login long-lived tokens last 60 days. Every Monday this refreshes the B_ACCESS_TOKEN secret (used by
+# "Publish reels (B)"). It saves the new token back only if the GH_SECRETS_PAT secret exists (a fine-grained GitHub
+# token with "Secrets: read and write" on THIS repo only); otherwise it just checks the token and reports the expiry.
+# Tokens that don't start with "IG" (system-user tokens) never expire and are left alone. The log never shows a token.
+on:
+  schedule:
+    - cron: "41 3 * * 1"     # Mondays 03:41 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Refresh token
+        env:
+          TOKEN: ${{ secrets.B_ACCESS_TOKEN }}
+          GH_TOKEN: ${{ secrets.GH_SECRETS_PAT }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -e
+          if [ -z "$TOKEN" ]; then echo "B_ACCESS_TOKEN secret missing"; exit 1; fi
+          case "$TOKEN" in
+            IG*) ;;
+            *) echo "System-user token: it never expires, nothing to refresh."; exit 0;;
+          esac
+          resp=$(curl -sS "https://graph.instagram.com/refresh_access_token?grant_type=ig_refresh_token&access_token=$TOKEN")
+          new=$(echo "$resp" | python3 -c "import sys,json; print(json.load(sys.stdin).get('access_token',''))")
+          days=$(echo "$resp" | python3 -c "import sys,json; print(int(json.load(sys.stdin).get('expires_in',0))//86400)")
+          if [ -z "$new" ]; then
+            echo "Refresh failed: $(echo "$resp" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('error',{}).get('message','unknown error'))")"
+            exit 1
+          fi
+          echo "::add-mask::$new"
+          echo "Token refreshed; valid for about $days more days."
+          if [ -n "$GH_TOKEN" ]; then
+            gh secret set B_ACCESS_TOKEN --repo "$REPO" --body "$new"
+            echo "Saved the refreshed token into B_ACCESS_TOKEN."
+          else
+            echo "GH_SECRETS_PAT not set: refreshed token NOT saved. Add it, or paste a new token before expiry."
+          fi

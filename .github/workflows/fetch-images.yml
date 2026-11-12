@@ -1,0 +1,84 @@
+name: Fetch images
+
+# Downloads freely licensed Wikimedia Commons files into the private source repo (assets/commons/ + a licence json
+# per file for on-screen credits), from GitHub's runners (cloud sessions are rate-limited by Wikimedia).
+# Run: Actions -> "Fetch images" -> Run workflow -> titles, one per line: exact "File:..." titles or "search: <words>".
+# Wikimedia's User-Agent policy asks for contact info: this uses this repo's URL (no email in inputs or logs);
+# optional secret WIKIMEDIA_TOKEN (OAuth 2.0 access token) for higher rate limits.
+on:
+  workflow_dispatch:
+    inputs:
+      titles:
+        description: "Commons file titles (File:...) or 'search: words', one per line"
+        required: true
+      width:
+        description: "Thumbnail width (standard sizes only: 960, 1280, 1920)"
+        default: "1920"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fetch-images
+  cancel-in-progress: false
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: aakashk9/reel-engine
+          token: ${{ secrets.REEL_ENGINE_TOKEN }}
+          fetch-depth: 1
+          filter: blob:none
+          sparse-checkout: |
+            assets/commons
+      - name: Download
+        env:
+          TITLES: ${{ inputs.titles }}
+          WIDTH: ${{ inputs.width }}
+          WM_TOKEN: ${{ secrets.WIKIMEDIA_TOKEN }}
+          CONTACT: https://github.com/${{ github.repository }}
+        run: |
+          python3 - <<'PY'
+          import json, os, re, time, urllib.parse, urllib.request, urllib.error
+          hdr = {"User-Agent": f"CommonsImageFetcher/1.0 (+{os.environ['CONTACT']}) python-urllib"}
+          if os.environ.get("WM_TOKEN"): hdr["Authorization"] = "Bearer " + os.environ["WM_TOKEN"]
+          def get(url):
+              for i in range(6):
+                  try: return urllib.request.urlopen(urllib.request.Request(url, headers=hdr), timeout=60).read()
+                  except urllib.error.HTTPError as e:
+                      if e.code != 429: raise
+                      time.sleep(int(e.headers.get("Retry-After", 10)) + 2)
+              raise SystemExit("still rate limited")
+          os.makedirs("assets/commons", exist_ok=True)
+          titles = []
+          for x in [x.strip() for x in os.environ["TITLES"].splitlines() if x.strip()]:
+              if x.lower().startswith("search:"):
+                  q = urllib.parse.urlencode(dict(action="query", list="search", srnamespace=6, srsearch=x[7:].strip(), srlimit=5, format="json"))
+                  hits = [r["title"] for r in json.loads(get("https://commons.wikimedia.org/w/api.php?" + q))["query"]["search"]]
+                  print("search", x[7:], "->", hits); titles += [h for h in hits if h.lower().endswith((".jpg", ".jpeg", ".png", ".svg", ".ogg", ".oga", ".mp3", ".wav", ".flac"))][:3]
+                  time.sleep(2)
+              else: titles.append(x)
+          for t in titles:
+              q = urllib.parse.urlencode(dict(action="query", titles=t, prop="imageinfo", iiprop="url|extmetadata", iiurlwidth=os.environ["WIDTH"], format="json"))
+              p = next(iter(json.loads(get("https://commons.wikimedia.org/w/api.php?" + q))["query"]["pages"].values()))["imageinfo"][0]
+              md = p["extmetadata"]; slug = re.sub(r"[^A-Za-z0-9]+", "_", t[5:].rsplit(".", 1)[0]).strip("_")
+              ext = t.rsplit(".", 1)[-1].lower()
+              if ext == "svg" and "thumburl" in p: ext = "png"
+              if ext in ("ogg", "oga", "mp3", "wav", "flac"): p["thumburl"] = p["url"]   # audio: original file
+              open(f"assets/commons/{slug}.{ext}", "wb").write(get(p.get("thumburl", p["url"])))
+              json.dump({"title": t, "page": p.get("descriptionurl"), "license": md.get("LicenseShortName", {}).get("value"),
+                         "artist": re.sub("<[^>]+>", "", md.get("Artist", {}).get("value", ""))}, open(f"assets/commons/{slug}.json", "w"), indent=1)
+              print("saved", slug); time.sleep(2)
+          PY
+      - name: Commit to the source repo
+        run: |
+          git config user.name "image-fetcher"; git config user.email "noreply@github.com"
+          git add assets/commons
+          if git diff --cached --quiet; then echo "nothing new"; exit 0; fi
+          git commit -q -m "Fetch Commons images [skip ci]"
+          for i in 1 2 3; do git pull -q --rebase origin main && git push -q origin HEAD:main && break; sleep 5; done
+          echo "saved to the source repo"

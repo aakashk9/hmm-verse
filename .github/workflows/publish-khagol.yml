@@ -1,22 +1,23 @@
 name: Publish Khagol episode (YouTube, Instagram, Facebook)
 
-# Khagol Chronicles episodes are made in the private repo aakashk9/khagol-chronicles and published from HERE, because
-# GitHub Actions minutes are free for public repositories (owner, 13 Nov 2026; Khagol's own runs were refused from
-# 12 Nov for the private-minutes spending limit). This file holds no secrets: the tokens live in this repo's encrypted
-# Actions secrets (KHAGOL_* names, so they never mix with Hmm.verse's), and the episode files + publishing tools are
-# read from khagol-chronicles with KHAGOL_TOKEN (fine-grained, khagol-chronicles only: Contents read/write to record
-# publishing/published/*.json, Issues read/write for the manual-steps issue).
+# Feed C. Khagol Chronicles episodes are made in the private repo aakashk9/khagol-chronicles and published from HERE,
+# because GitHub Actions minutes are free for public repositories (owner, 13 Nov 2026; Khagol's own runs were refused
+# from 12 Nov for the private-minutes spending limit). This file holds no secrets. Secrets in this repo:
+# REEL_ENGINE_TOKEN (also has khagol-chronicles access: Contents read/write to record publishing/published/*.json),
+# C_ACCESS_TOKEN, C_USER_ID, C_FB_PAGE_ID, C_YT_CLIENT_ID, C_YT_CLIENT_SECRET, C_YT_REFRESH_TOKEN.
+# Variables: C_AUTOPUBLISH = "on" (master switch for scheduled runs); optional C_YT_PRIVACY, C_CHANNEL_URL,
+# C_INSTAGRAM_URL, C_FACEBOOK_URL.
 #
-# Trigger: every 15 minutes (or a repository_dispatch "khagol-release" sent right after a signoff) it looks for
-# episodes in khagol-chronicles whose production/reviews/RELEASE_READY.md was added within the last 7 days, that have
+# Every 3 hours (or a repository_dispatch "khagol-release" sent right after a signoff) it looks for episodes in
+# khagol-chronicles whose production/reviews/RELEASE_READY.md was added within the last 7 days, that have
 # publishing/release.json, no publishing/skip, and at least one platform step without its publishing/published/<step>.json.
-# Each scheduled attempt is counted in publishing/published/auto_attempts.json; after 2 attempts an episode is left for a
-# manual run, so a broken step never retries every 15 minutes. Order and behaviour are unchanged:
-# tools/khagol_release.py posts documentary (YouTube) -> Short (YouTube) -> Reel (Instagram) -> Reel (Facebook Page).
-# Master switch for scheduled runs: repo variable KHAGOL_AUTOPUBLISH = "on". Manual runs default to dry_run.
+# Each scheduled attempt is counted in publishing/published/auto_attempts.json; after 3 attempts an episode waits for a
+# manual run. Steps already posted are never re-run, so a retry only redoes what failed (e.g. Instagram).
+# Order: tools/khagol_release.py posts documentary (YouTube) -> Short (YouTube) -> Reel (Instagram) -> Reel (Facebook).
+# Manual runs default to dry_run.
 on:
   schedule:
-    - cron: "4,19,34,49 * * * *"
+    - cron: "4 */3 * * *"
   repository_dispatch:
     types: [khagol-release]
   workflow_dispatch:
@@ -54,31 +55,35 @@ jobs:
       PYTHONUNBUFFERED: "1"
       DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && '1' || '' }}
       # Meta (one system-user token for the Instagram account and the Facebook Page)
-      IG_ACCESS_TOKEN: ${{ secrets.KHAGOL_IG_ACCESS_TOKEN }}
-      IG_USER_ID: ${{ secrets.KHAGOL_IG_USER_ID }}
-      FB_ACCESS_TOKEN: ${{ secrets.KHAGOL_IG_ACCESS_TOKEN }}
-      FB_PAGE_ID: ${{ secrets.KHAGOL_FB_PAGE_ID }}
+      IG_ACCESS_TOKEN: ${{ secrets.C_ACCESS_TOKEN }}
+      IG_USER_ID: ${{ secrets.C_USER_ID }}
+      FB_ACCESS_TOKEN: ${{ secrets.C_ACCESS_TOKEN }}
+      FB_PAGE_ID: ${{ secrets.C_FB_PAGE_ID }}
       IG_API_VERSION: ${{ vars.IG_API_VERSION || 'v23.0' }}
-      IG_DEADLINE_MIN: "100"
+      # Instagram failures: same handling as Hmm.verse / curious.janta (tools/ig_publish.py from reel-engine, 12 Nov):
+      # up to 5 fresh containers per run, each retry a freshly re-encoded copy, earlier containers keep being watched and
+      # the first to finish is published (only one ever is). 3 scheduled runs, 3 hours apart, before it waits for a manual run.
+      IG_DEADLINE_MIN: "60"
       IG_UPLOAD_TRIES: "5"
+      IG_RETRY_WAIT: "45"
       # YouTube (Khagol channel's own Google Cloud project)
-      YT_CLIENT_ID: ${{ secrets.KHAGOL_YT_CLIENT_ID }}
-      YT_CLIENT_SECRET: ${{ secrets.KHAGOL_YT_CLIENT_SECRET }}
-      YT_REFRESH_TOKEN: ${{ secrets.KHAGOL_YT_REFRESH_TOKEN }}
-      YT_PRIVACY: ${{ vars.KHAGOL_YT_PRIVACY || 'public' }}
-      KHAGOL_CHANNEL_URL: ${{ vars.KHAGOL_CHANNEL_URL || 'https://www.youtube.com/@KhagolChronicles' }}
-      KHAGOL_INSTAGRAM_URL: ${{ vars.KHAGOL_INSTAGRAM_URL }}
-      KHAGOL_FACEBOOK_URL: ${{ vars.KHAGOL_FACEBOOK_URL }}
+      YT_CLIENT_ID: ${{ secrets.C_YT_CLIENT_ID }}
+      YT_CLIENT_SECRET: ${{ secrets.C_YT_CLIENT_SECRET }}
+      YT_REFRESH_TOKEN: ${{ secrets.C_YT_REFRESH_TOKEN }}
+      YT_PRIVACY: ${{ vars.C_YT_PRIVACY || 'public' }}
+      KHAGOL_CHANNEL_URL: ${{ vars.C_CHANNEL_URL || 'https://www.youtube.com/@KhagolChronicles' }}
+      KHAGOL_INSTAGRAM_URL: ${{ vars.C_INSTAGRAM_URL }}
+      KHAGOL_FACEBOOK_URL: ${{ vars.C_FACEBOOK_URL }}
     steps:
       - name: Check switch and token
         id: gate
         env:
-          AUTOPUBLISH: ${{ vars.KHAGOL_AUTOPUBLISH }}
-          HAS_TOKEN: ${{ secrets.KHAGOL_TOKEN != '' }}
+          AUTOPUBLISH: ${{ vars.C_AUTOPUBLISH }}
+          HAS_TOKEN: ${{ secrets.REEL_ENGINE_TOKEN != '' }}
           EVENT: ${{ github.event_name }}
         run: |
-          if [ "$HAS_TOKEN" != "true" ]; then echo "KHAGOL_TOKEN secret missing - nothing to do." | tee -a "$GITHUB_STEP_SUMMARY"; echo "go=" >> "$GITHUB_OUTPUT"; exit 0; fi
-          if [ "$EVENT" != "workflow_dispatch" ] && [ "$AUTOPUBLISH" != "on" ]; then echo "KHAGOL_AUTOPUBLISH is not 'on'." | tee -a "$GITHUB_STEP_SUMMARY"; echo "go=" >> "$GITHUB_OUTPUT"; exit 0; fi
+          if [ "$HAS_TOKEN" != "true" ]; then echo "REEL_ENGINE_TOKEN secret missing - nothing to do." | tee -a "$GITHUB_STEP_SUMMARY"; echo "go=" >> "$GITHUB_OUTPUT"; exit 0; fi
+          if [ "$EVENT" != "workflow_dispatch" ] && [ "$AUTOPUBLISH" != "on" ]; then echo "C_AUTOPUBLISH is not 'on'." | tee -a "$GITHUB_STEP_SUMMARY"; echo "go=" >> "$GITHUB_OUTPUT"; exit 0; fi
           echo "go=1" >> "$GITHUB_OUTPUT"
 
       # History without file contents + only the small folders: khagol-chronicles holds GBs of renders.
@@ -86,7 +91,7 @@ jobs:
         if: steps.gate.outputs.go
         with:
           repository: ${{ env.SRC }}
-          token: ${{ secrets.KHAGOL_TOKEN }}
+          token: ${{ secrets.REEL_ENGINE_TOKEN }}
           fetch-depth: 0
           filter: blob:none
           sparse-checkout: |
@@ -125,7 +130,7 @@ jobs:
               tries = 0
               if pub + "published/auto_attempts.json" in files:
                   tries = json.loads(git("show", "HEAD:" + pub + "published/auto_attempts.json")).get("attempts", 0)
-              if tries >= 2:
+              if tries >= 3:
                   print(f"{ep}: {','.join(todo)} still pending after {tries} automatic attempts - run it manually.",
                         file=__import__('sys').stderr)
                   continue
@@ -188,7 +193,7 @@ jobs:
       - name: Record what was published (in khagol-chronicles) and open the manual-steps issue there
         if: always() && steps.pick.outputs.episodes != '' && !startsWith(steps.pick.outputs.episodes, '--')
         env:
-          GH_TOKEN: ${{ secrets.KHAGOL_TOKEN }}
+          GH_TOKEN: ${{ secrets.REEL_ENGINE_TOKEN }}
           EPISODES: ${{ steps.pick.outputs.episodes }}
           EVENT: ${{ github.event_name }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}

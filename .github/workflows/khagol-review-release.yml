@@ -1,6 +1,6 @@
 # Khagol review package pre-release, run from this public repo for free Actions minutes (owner, 13 Nov 2026).
 # Same job as khagol-chronicles' review-release.yml, but the files are read from, and the PRE-release is created in,
-# the PRIVATE repo aakashk9/khagol-chronicles (token KHAGOL_TOKEN), so unreleased review cuts never become public.
+# the PRIVATE repo aakashk9/khagol-chronicles (token REEL_ENGINE_TOKEN), so unreleased review cuts never become public.
 # Never posts to any social platform, never touches publishing/release.json, never creates RELEASE_READY.md.
 # Input manifest: a sha256sum-format file, paths relative to the khagol-chronicles root; every file is verified with
 # `sha256sum -c` before upload, and any mismatch fails the run with nothing published.
@@ -37,16 +37,16 @@ jobs:
     steps:
       - name: Check token and tag
         env:
-          HAS_TOKEN: ${{ secrets.KHAGOL_TOKEN != '' }}
+          HAS_TOKEN: ${{ secrets.REEL_ENGINE_TOKEN != '' }}
           TAG: ${{ inputs.tag }}
         run: |
-          [ "$HAS_TOKEN" = "true" ] || { echo "::error::KHAGOL_TOKEN secret missing"; exit 1; }
+          [ "$HAS_TOKEN" = "true" ] || { echo "::error::REEL_ENGINE_TOKEN secret missing"; exit 1; }
           case "$TAG" in review-*) ;; *) echo "::error::tag must start with review-"; exit 1;; esac
 
       - uses: actions/checkout@v4
         with:
           repository: ${{ env.SRC }}
-          token: ${{ secrets.KHAGOL_TOKEN }}
+          token: ${{ secrets.REEL_ENGINE_TOKEN }}
           fetch-depth: 1
           filter: blob:none
           sparse-checkout: |
@@ -92,7 +92,7 @@ jobs:
 
       - name: Create or refresh the pre-release in khagol-chronicles
         env:
-          GH_TOKEN: ${{ secrets.KHAGOL_TOKEN }}
+          GH_TOKEN: ${{ secrets.REEL_ENGINE_TOKEN }}
           TAG: ${{ inputs.tag }}
           TITLE: ${{ inputs.title }}
           NOTES: ${{ inputs.notes }}

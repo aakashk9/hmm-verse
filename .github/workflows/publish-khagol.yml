@@ -40,7 +40,7 @@ on:
         default: "lite"
 
 permissions:
-  contents: read
+  contents: write     # only for the temporary "ig-host" pre-release (Instagram URL uploads); files are deleted after each run
 
 concurrency:
   group: khagol-publish
@@ -66,6 +66,11 @@ jobs:
       IG_DEADLINE_MIN: "60"
       IG_UPLOAD_TRIES: "5"
       IG_RETRY_WAIT: "45"
+      # 13 Nov 2026: Instagram's rupload never received a Khagol file (EP01, EP02: 0 bytes, 10/10 failures), so
+      # Instagram downloads the video from a URL instead: a temporary asset of this repo's "ig-host" pre-release.
+      IG_UPLOAD_MODE: ${{ vars.C_IG_UPLOAD_MODE || 'url' }}
+      IG_HOST_REPO: ${{ github.repository }}
+      IG_HOST_GH_TOKEN: ${{ github.token }}
       # YouTube (Khagol channel's own Google Cloud project)
       YT_CLIENT_ID: ${{ secrets.C_YT_CLIENT_ID }}
       YT_CLIENT_SECRET: ${{ secrets.C_YT_CLIENT_SECRET }}

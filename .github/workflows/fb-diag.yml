@@ -1,0 +1,23 @@
+name: Facebook Page diagnostics (read-only)
+# Read-only check of the Hmm.verse Facebook Page: page status and, for the latest reels, publish status, privacy
+# and the play/reach numbers Meta reports. Never posts or changes anything. Manual only.
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  diag:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: aakashk9/reel-engine
+          token: ${{ secrets.REEL_ENGINE_TOKEN }}
+          fetch-depth: 1
+          sparse-checkout: tools
+      - name: Diagnose
+        env:
+          FB_ACCESS_TOKEN: ${{ secrets.HMMVERSE_ACCESS_TOKEN }}
+          FB_PAGE_ID: ${{ secrets.HMMVERSE_FB_PAGE_ID }}
+        run: python3 tools/fb_diag.py

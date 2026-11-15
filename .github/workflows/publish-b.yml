@@ -26,7 +26,7 @@ on:
         default: false
 
 permissions:
-  contents: read
+  contents: write     # only for the temporary "ig-host" pre-release (Instagram URL uploads); files are deleted after each run
 
 concurrency:
   group: publish-b
@@ -130,6 +130,11 @@ jobs:
           IG_ACCESS_TOKEN: ${{ secrets.B_ACCESS_TOKEN }}
           IG_USER_ID: ${{ secrets.B_USER_ID }}
           IG_API_VERSION: ${{ vars.IG_API_VERSION || 'v23.0' }}
+          # 15 Nov 2026 (owner): Instagram fetches the video from a temporary public URL instead of our direct upload,
+          # which Meta kept losing (0 bytes received). Set B_IG_UPLOAD_MODE=resumable to go back.
+          IG_UPLOAD_MODE: ${{ vars.B_IG_UPLOAD_MODE || 'url' }}
+          IG_HOST_REPO: ${{ github.repository }}
+          IG_HOST_GH_TOKEN: ${{ github.token }}
           IG_STORY: ${{ vars.B_STORY || 'on' }}
           DRY_RUN: ${{ inputs.dry_run && '1' || '' }}
           PYTHONUNBUFFERED: "1"

@@ -5,9 +5,14 @@
 # Spacing: oldest pending reel from the last 4 days, one per run, at least D_MIN_GAP_MIN minutes apart (default 120).
 # Secrets: D_ACCESS_TOKEN, D_USER_ID, REEL_ENGINE_TOKEN (needs Contents read/write on SRC and read on reel-engine).
 # Master switch for the timer: repo variable D_AUTOPUBLISH = "on". Manual runs work without it.
+# Direct trigger (17 Nov 2026): the daily scheduled task sends repository_dispatch "rr-publish" with
+# client_payload {"folder": "posts/renders/<date_slug>"} right after it pushes a gate-passed reel, so it posts at once
+# instead of waiting for the timer. Dispatch runs work without D_AUTOPUBLISH (the owner approved the daily task).
 on:
   schedule:
     - cron: "11,26,41,56 * * * *"
+  repository_dispatch:
+    types: [rr-publish]
   workflow_dispatch:
     inputs:
       folder:
@@ -41,7 +46,7 @@ jobs:
           EVENT: ${{ github.event_name }}
         run: |
           if [ "$HAS_TOKEN" != "true" ]; then echo "A secret is missing - nothing to do."; echo "go=" >> "$GITHUB_OUTPUT"; exit 0; fi
-          if [ "$EVENT" != "workflow_dispatch" ] && [ "$AUTOPUBLISH" != "on" ]; then echo "D_AUTOPUBLISH is not 'on'."; echo "go=" >> "$GITHUB_OUTPUT"; exit 0; fi
+          if [ "$EVENT" = "schedule" ] && [ "$AUTOPUBLISH" != "on" ]; then echo "D_AUTOPUBLISH is not 'on'."; echo "go=" >> "$GITHUB_OUTPUT"; exit 0; fi
           echo "go=1" >> "$GITHUB_OUTPUT"
 
       - uses: actions/checkout@v4
@@ -67,9 +72,12 @@ jobs:
         id: pick
         if: steps.gate.outputs.go
         env:
-          INPUT_FOLDER: ${{ inputs.folder }}
+          INPUT_FOLDER: ${{ inputs.folder || github.event.client_payload.folder }}
           MIN_GAP: ${{ vars.D_MIN_GAP_MIN || '120' }}
         run: |
+          if [ -n "$INPUT_FOLDER" ] && ! [[ "$INPUT_FOLDER" =~ ^(--[a-z]+=)?posts/renders/[A-Za-z0-9_.,@-]+/?$ ]]; then
+            echo "Refusing folder input that is not posts/renders/<name>"; exit 1
+          fi
           if [ -n "$INPUT_FOLDER" ]; then
             folders="${INPUT_FOLDER%/}"
           else

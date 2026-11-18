@@ -1,0 +1,67 @@
+# Read-only Instagram diagnostics for Feed D (why media_publish returns 2207085). Manual only. Never posts, never
+# changes anything on Instagram. The public log stays quiet: the findings are committed to the private repo (SRC) as
+# automation/ig_diag_d.txt. The token itself is never printed.
+name: Instagram diagnostics (D, read-only)
+on:
+  workflow_dispatch:
+    inputs:
+      containers:
+        description: "Optional comma-separated container IDs to inspect"
+        required: false
+        default: ""
+permissions:
+  contents: read
+jobs:
+  diag:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      SRC: aakashk9/roots-and-reasons
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SRC }}
+          token: ${{ secrets.REEL_ENGINE_TOKEN }}
+          fetch-depth: 1
+          sparse-checkout: automation
+      - name: Diagnose (read-only GET calls)
+        env:
+          TOKEN: ${{ secrets.D_ACCESS_TOKEN }}
+          IG_ID: ${{ secrets.D_USER_ID }}
+          VER: ${{ vars.IG_API_VERSION || 'v23.0' }}
+          CONTAINERS: ${{ inputs.containers }}
+        run: |
+          python3 - > automation/ig_diag_d.txt 2>&1 <<'PY'
+          import json, os, urllib.parse, urllib.request, urllib.error, datetime
+          T, IG, V = os.environ["TOKEN"], os.environ["IG_ID"], os.environ["VER"]
+          host = "https://graph.instagram.com" if T.startswith("IG") else "https://graph.facebook.com"
+          def get(path, **p):
+              p["access_token"] = T
+              u = f"{host}/{V}/{path}?" + urllib.parse.urlencode(p)
+              try:
+                  with urllib.request.urlopen(u, timeout=30) as r:
+                      return json.loads(r.read())
+              except urllib.error.HTTPError as e:
+                  return {"HTTP": e.code, "body": json.loads(e.read() or b"{}")}
+          def show(title, obj):
+              print(f"## {title}"); print(json.dumps(obj, indent=1, ensure_ascii=False)[:3000]); print()
+          print("run at", datetime.datetime.utcnow().isoformat() + "Z", "| token kind:", "IG-login" if T.startswith("IG") else "EAA (Facebook/Unified login)", "| host:", host)
+          dbg = get("debug_token", input_token=T)
+          d = dbg.get("data", dbg)
+          show("token (debug_token)", {k: d.get(k) for k in ("type", "app_id", "application", "is_valid", "expires_at", "data_access_expires_at", "scopes", "granular_scopes", "error")} if isinstance(d, dict) else d)
+          show("me (token owner)", get("me", fields="id,name"))
+          show("account", get(IG, fields="username,name,media_count,followers_count,biography,website"))
+          show("publishing quota", get(f"{IG}/content_publishing_limit", fields="config,quota_usage"))
+          show("recent media", get(f"{IG}/media", fields="id,media_type,media_product_type,timestamp,permalink", limit=5))
+          for c in [x.strip() for x in os.environ.get("CONTAINERS", "").split(",") if x.strip()]:
+              show(f"container {c}", get(c, fields="id,status_code,status,copyright_check_status,video_status"))
+          PY
+          sed -i "s/$IG/<ig_id>/g" automation/ig_diag_d.txt
+          echo "diagnostics written to the private repo"
+      - name: Commit findings to the private repo
+        run: |
+          git config user.name "publisher"; git config user.email "noreply@github.com"
+          git add -f automation/ig_diag_d.txt
+          git commit -q -m "Instagram diagnostics (D) [skip ci]" || exit 0
+          for i in 1 2 3; do git pull -q --rebase origin main && git push -q origin HEAD:main && break; sleep 5; done
+          echo "recorded"

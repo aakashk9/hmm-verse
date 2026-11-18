@@ -56,7 +56,7 @@ jobs:
           for c in [x.strip() for x in os.environ.get("CONTAINERS", "").split(",") if x.strip()]:
               show(f"container {c}", get(c, fields="id,status_code,status,copyright_check_status,video_status"))
           PY
-          sed -i "s/$IG/<ig_id>/g" automation/ig_diag_d.txt
+          [ -n "$IG_ID" ] && sed -i "s/$IG_ID/<ig_id>/g" automation/ig_diag_d.txt
           echo "diagnostics written to the private repo"
       - name: Commit findings to the private repo
         run: |

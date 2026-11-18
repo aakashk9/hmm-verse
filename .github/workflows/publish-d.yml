@@ -8,6 +8,8 @@
 # Direct trigger (17 Nov 2026): the daily scheduled task sends repository_dispatch "rr-publish" with
 # client_payload {"folder": "posts/renders/<date_slug>"} right after it pushes a gate-passed reel, so it posts at once
 # instead of waiting for the timer. Dispatch runs work without D_AUTOPUBLISH (the owner approved the daily task).
+# 18 Nov 2026: reels carry "post_after" in publish.json; the owner's external cron dispatches this workflow every
+# 30 min (empty folder = oldest pending), which posts each reel once its time has come.
 on:
   schedule:
     - cron: "11,26,41,56 * * * *"
@@ -73,13 +75,21 @@ jobs:
         if: steps.gate.outputs.go
         env:
           INPUT_FOLDER: ${{ inputs.folder || github.event.client_payload.folder }}
+          EVENT: ${{ github.event_name }}
           MIN_GAP: ${{ vars.D_MIN_GAP_MIN || '120' }}
         run: |
           if [ -n "$INPUT_FOLDER" ] && ! [[ "$INPUT_FOLDER" =~ ^(--[a-z]+=)?posts/renders/[A-Za-z0-9_.,@-]+/?$ ]]; then
             echo "Refusing folder input that is not posts/renders/<name>"; exit 1
           fi
+          # post_after (owner, 18 Nov 2026): the daily task picks the posting time and writes it into the reel's
+          # publish.json as "post_after" (ISO time, e.g. 2026-11-19T18:30:00+05:30). Timer and dispatch runs leave a
+          # reel alone until then; a manual run with an explicit folder still posts at once.
+          due() { pa=$(git show "HEAD:$1/publish.json" 2>/dev/null | python3 -c "import json,sys,datetime as D;v=json.load(sys.stdin).get('post_after','');print(int(D.datetime.fromisoformat(v).timestamp()) if v else 0)" 2>/dev/null || echo 0); [ "${pa:-0}" -le "$(date +%s)" ]; }
           if [ -n "$INPUT_FOLDER" ]; then
             folders="${INPUT_FOLDER%/}"
+            if [ "$EVENT" = "repository_dispatch" ] && [[ "$folders" != --* ]] && ! due "$folders"; then
+              echo "1 reel scheduled for later (post_after) - the timer posts it when due"; folders=""
+            fi
           else
             since=$(TZ=Asia/Kolkata date -d '4 days ago' +%Y-%m-%d)
             files=$(git ls-tree -r --name-only HEAD posts/renders/)
@@ -98,6 +108,7 @@ jobs:
                 echo "$files" | grep -qx "$d/caption.md" || continue
                 echo "$files" | grep -qx "$d/published.json" && continue
                 echo "$files" | grep -qx "$d/skip" && continue
+                if ! due "$d"; then echo "1 reel scheduled for later (post_after)"; continue; fi
                 # a reel Instagram already refused twice is left for a manual run, so it can't block the queue
                 if echo "$files" | grep -qx "$d/publish_log.txt"; then
                   fails=$(git show "HEAD:$d/publish_log.txt" 2>/dev/null | grep -c "NOT PUBLISHED" || true)

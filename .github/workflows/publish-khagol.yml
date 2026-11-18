@@ -15,6 +15,9 @@ name: Publish Khagol episode (YouTube, Instagram, Facebook)
 # manual run. Steps already posted are never re-run, so a retry only redoes what failed (e.g. Instagram).
 # Order: tools/khagol_release.py posts documentary (YouTube) -> Short (YouTube) -> Reel (Instagram) -> Reel (Facebook).
 # Manual runs default to dry_run.
+# 18 Nov 2026 (owner): release.json may carry "post_after" (ISO time, e.g. 2026-11-19T18:30:00+05:30), set by the daily
+# task. Scheduled and dispatch runs skip the episode until then (the owner's external cron dispatches this workflow
+# regularly); a manual run with an explicit episode still posts at once. Attempts are only counted once it is due.
 on:
   schedule:
     - cron: "4 */3 * * *"
@@ -128,6 +131,13 @@ jobs:
               if not added or now - int(added) > 7 * 86400:
                   continue                      # old signoffs never auto-publish (same as "newly added" before)
               m = json.loads(git("show", "HEAD:" + pub + "release.json"))
+              # post_after (owner, 18 Nov 2026): the daily task picks the posting time; wait until then
+              pa = m.get("post_after")
+              if pa:
+                  import datetime as _d
+                  if _d.datetime.fromisoformat(pa).timestamp() > now:
+                      print(f"{ep}: scheduled for {pa} (post_after) - waiting.", file=__import__('sys').stderr)
+                      continue
               todo = [s for s in ("documentary", "short", "instagram", "facebook")
                       if m.get(s) and pub + "published/" + s + ".json" not in files]
               if not todo:
